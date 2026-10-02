@@ -24,6 +24,10 @@
             --send-btn-bg: #07c160; 
             --send-btn-color: #ffffff;
             --clear-btn-color: #999999;
+            /* 底部抬升：整条 dock（输入条 + 附件面板 + 悬浮切换条）整体上移的像素数。
+               屏幕最下一指宽是拇指盲区，摇杆贴底时够不着。这里只给默认值，
+               实际生效值由脚本按 localStorage 覆盖（见「底部抬升」段）。 */
+            --dock-lift: 80px;
         }
         body, html {
             margin: 0;
@@ -287,6 +291,15 @@
         #accessory-panel {
             position: relative;
             box-sizing: border-box;
+            /* 底部抬升落在面板的下外边距上：它是 #app（flex 列）的最后一个子项，
+               留出下边距＝整条 dock 一起上移，差额由 flex:1 的 #chat-list 吸收，
+               面板自身高度（JS 内联）不受影响。 */
+            margin-bottom: var(--dock-lift);
+        }
+        /* 键盘弹起时收回抬升：输入条要紧贴键盘顶边，否则中间空出一条无用的灰带。
+           类由 adjustViewport 按面板状态机推算的键盘高度切换。 */
+        #app.kb-open #accessory-panel {
+            margin-bottom: 0;
         }
         #panel-tabs {
             /* 悬浮在输入条（bottom-bar）上方，不占用面板空间 */
@@ -311,7 +324,8 @@
         #panel-tabs.hidden {
             display: none;
         }
-        #panel-tabs .tab {
+        #panel-tabs .tab,
+        #panel-tabs .dock-lift {
             display: flex;
             align-items: center;
             justify-content: center;
@@ -326,14 +340,26 @@
             touch-action: manipulation;
             transition: transform 0.08s, background-color 0.15s, color 0.15s;
         }
-        #panel-tabs .tab:active {
+        #panel-tabs .tab:active,
+        #panel-tabs .dock-lift:active {
             transform: scale(0.93);
         }
         #panel-tabs .tab.active {
             background-color: #07c160;
             color: #ffffff;
         }
-        #panel-tabs .tab .ico {
+        /* 抬升挡位按钮：与面板 tab 同高同形，但常驻浅底色 + 左侧细分隔线，
+           让它一眼读作「另一个控件」，而不是第 5 个面板。 */
+        #panel-tabs .dock-lift {
+            min-width: 34px;
+            padding: 0 9px;
+            background: rgba(0, 0, 0, 0.05);
+            color: #666;
+            border-right: 1px solid rgba(0, 0, 0, 0.08);
+            border-radius: 14px 4px 4px 14px;
+        }
+        #panel-tabs .tab .ico,
+        #panel-tabs .dock-lift .ico {
             font-size: 17px;
             line-height: 1;
         }
@@ -591,8 +617,11 @@
         </div>
         <button id="btn-plus" data-page-node-id="a2xgZzVrS3MDshFgBm1Jja"><span class="hamburger" data-page-node-id="5sSDsEmhK721fRH68hp2b2"></span></button>
         <button id="btn-send" data-page-node-id="VtG4Z3V3IGwxnJUzNm3IK2"></button>
-        <!-- 子面板切换条：悬浮在输入条上方，不占面板空间；随汉堡/焦点显隐 -->
+        <!-- 子面板切换条：悬浮在输入条上方，不占面板空间；随汉堡/焦点显隐。
+             最左侧是「底部抬升」挡位按钮——它不是一个面板，所以刻意不带 .tab 类：
+             既不参与面板的互斥高亮，也不会被文件传输的整片锁定一起 disable。 -->
         <div id="panel-tabs" class="hidden">
+            <button type="button" id="btn-dock-lift" class="dock-lift" aria-label="底部抬升"><span class="ico">⇕</span></button>
             <button type="button" class="tab active" data-panel="keys" aria-label="键盘"><span class="ico">⌨️</span></button>
             <button type="button" class="tab" data-panel="file" aria-label="文件"><span class="ico">📁</span></button>
             <button type="button" class="tab" data-panel="touchpad" aria-label="触控板"><span class="ico">🖱️</span></button>
@@ -965,6 +994,15 @@
         }
 
         /**
+         * 当前推算的键盘高度（0 = 键盘收起）。
+         * 状态机每帧都在维护它，需要判断「键盘是否弹起」的调用方（如底部抬升）
+         * 直接读这里，不必在外面用 _maxVH - height 再算一遍。
+         */
+        get keyboardHeight() {
+            return this._kh;
+        }
+
+        /**
          * 显示面板：立即进入 visible 状态，根据当前键盘高度设置面板高度。
          * 竞态保护：清掉上一次 hiding 的定时器。
          */
@@ -1061,12 +1099,48 @@
             hideTimeout: 500,
         });
 
+        // ---- 底部抬升（--dock-lift）----
+        // 只改 CSS 变量，不碰任何 layout 数字：面板高度归状态机管、视口高度归
+        // adjustViewport 管，抬升量是独立的一维，互不干扰。
+        // 值持久化在 localStorage，刷新 / 重连后保持用户调好的手感。
+        const DOCK_LIFT_KEY = 'phonemic.dock_lift';
+        const DOCK_LIFT_MAX = 240;
+
+        function getDockLift() {
+            const raw = getComputedStyle(document.documentElement)
+                .getPropertyValue('--dock-lift');
+            const v = parseInt(raw, 10);
+            return Number.isNaN(v) ? 0 : v;
+        }
+
+        function setDockLift(px) {
+            const v = Math.max(0, Math.min(DOCK_LIFT_MAX, Math.round(px)));
+            document.documentElement.style.setProperty('--dock-lift', v + 'px');
+            try {
+                localStorage.setItem(DOCK_LIFT_KEY, String(v));
+            } catch (e) { /* 无痕模式等禁用存储：本次会话生效即可 */ }
+            return v;
+        }
+        window._getDockLift = getDockLift;
+        window._setDockLift = setDockLift;
+
+        // 有存档才覆盖 CSS 里的默认值——否则会把默认写死进存储，改默认值就不生效了
+        try {
+            const saved = localStorage.getItem(DOCK_LIFT_KEY);
+            if (saved !== null) {
+                const v = parseInt(saved, 10);
+                if (!Number.isNaN(v)) setDockLift(v);
+            }
+        } catch (e) { /* 读不到就用 CSS 默认值 */ }
+
         function adjustViewport() {
             if (window.visualViewport) {
                 const height = window.visualViewport.height;
                 app.style.height = `${height}px`;
                 // 键盘高度推算、缓存维护与面板高度更新收敛到面板内部
                 window._accessoryPanel.syncViewport(height);
+                // 键盘弹起时收回抬升（syncViewport 刚刷新过键盘高度，现读现用）
+                app.classList.toggle('kb-open', window._accessoryPanel.keyboardHeight > 10);
                 window.scrollTo(0, 0);
                 if (window.chatManagerInstance) window.chatManagerInstance.scrollToBottom();
             }
@@ -2720,6 +2794,28 @@
                 if (navigator.vibrate) navigator.vibrate(15);
             });
         });
+
+        // 底部抬升挡位：点一下按 0 → 60 → 120 → 180 → 0 循环。
+        // 每次都从「当前值」往上找第一个更高的挡，因此当前值不是挡位之一时
+        // （CSS 默认 80，或控制台手设的任意值）下一次点击也落在最近的更高挡上，
+        // 而不是先跳回 0 再重来。
+        const liftBtn = document.getElementById('btn-dock-lift');
+        if (liftBtn) {
+            const LIFT_LEVELS = [0, 60, 120, 180];
+            const renderLiftLabel = function () {
+                liftBtn.setAttribute(
+                    'aria-label', t('panel_tab_lift') + ' ' + window._getDockLift() + 'px');
+            };
+            renderLiftLabel();
+            liftBtn.addEventListener('click', function (e) {
+                e.preventDefault();
+                const current = window._getDockLift();
+                const next = LIFT_LEVELS.find(function (lv) { return lv > current; });
+                window._setDockLift(next === undefined ? LIFT_LEVELS[0] : next);
+                renderLiftLabel();
+                if (navigator.vibrate) navigator.vibrate(15);
+            });
+        }
 
         // 所有带 data-i18n 的占位文案统一回填（鼠标面板的提示由 MouseJoystick 自管）
         document.querySelectorAll('#accessory-panel [data-i18n]').forEach(function (el) {

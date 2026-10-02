@@ -356,6 +356,21 @@ def sent_messages(page):
     return page.evaluate("() => window.__mockWS.sentMessages")
 
 
+def dock_gap(page):
+    """附件面板下边缘到 #app 底边的距离（= 当前生效的底部抬升量，px）。
+
+    面板收起时高度为 0 但仍在布局里（height:0 + overflow:hidden，不是 display:none），
+    所以不必先展开面板就能量到抬升量。
+    """
+    return page.evaluate(
+        """() => {
+             const app = document.getElementById('app').getBoundingClientRect();
+             const panel = document.getElementById('accessory-panel').getBoundingClientRect();
+             return Math.round(app.bottom - panel.bottom);
+           }"""
+    )
+
+
 class TestPageLoad:
     def test_page_loads_and_connected(self, mobile_page):
         assert mobile_page.title() == "📱🎙️PhoneMic💬💻"
@@ -368,6 +383,91 @@ class TestPageLoad:
         assert mobile_page.locator("#mode-toggle").is_hidden()
         mobile_page.locator("#input-box").fill("")
         assert mobile_page.locator("#mode-toggle").is_visible()
+
+
+class TestDockLift:
+    """底部抬升：把输入条 + 附件面板整条 dock 上移，让摇杆脱离屏幕底部的拇指盲区。
+
+    机制落在 #accessory-panel 的 margin-bottom 上（它是 #app 的最后一个 flex 子项），
+    差额由 flex:1 的 #chat-list 吸收，面板自身高度不受影响。
+    """
+
+    def test_default_lift_applied(self, mobile_page):
+        assert mobile_page.evaluate("() => window._getDockLift()") == 80
+        assert dock_gap(mobile_page) == 80
+
+    def test_lift_is_adjustable_and_clamped(self, mobile_page):
+        """可调范围 0~240：越界值被夹住，不是写进来多少就是多少。"""
+        mobile_page.evaluate("() => window._setDockLift(140)")
+        assert dock_gap(mobile_page) == 140
+
+        mobile_page.evaluate("() => window._setDockLift(9999)")
+        assert mobile_page.evaluate("() => window._getDockLift()") == 240
+
+        mobile_page.evaluate("() => window._setDockLift(-50)")
+        assert mobile_page.evaluate("() => window._getDockLift()") == 0
+        assert dock_gap(mobile_page) == 0
+
+    def test_does_not_change_panel_height(self, mobile_page):
+        """抬升只搬位置、不改高度：摇杆按容器实测尺寸布局，高度变了就会算错。"""
+        before = mobile_page.evaluate(
+            "() => getComputedStyle(document.getElementById('accessory-panel')).height")
+        mobile_page.evaluate("() => window._setDockLift(200)")
+        after = mobile_page.evaluate(
+            "() => getComputedStyle(document.getElementById('accessory-panel')).height")
+        assert before == after
+
+    def test_retracts_while_keyboard_is_open(self, mobile_page):
+        """键盘弹起时必须收回抬升：输入条要紧贴键盘，中间不能空出一条灰带。"""
+        size = mobile_page.viewport_size
+        mobile_page.set_viewport_size({"width": size["width"], "height": size["height"] - 300})
+        mobile_page.wait_for_timeout(200)
+
+        assert mobile_page.evaluate(
+            "() => document.getElementById('app').classList.contains('kb-open')") is True
+        assert mobile_page.evaluate(
+            "() => getComputedStyle(document.getElementById('accessory-panel')).marginBottom"
+        ) == "0px"
+
+        # 键盘收起后抬升要回来
+        mobile_page.set_viewport_size(size)
+        mobile_page.wait_for_timeout(200)
+        assert mobile_page.evaluate(
+            "() => document.getElementById('app').classList.contains('kb-open')") is False
+        assert dock_gap(mobile_page) == 80
+
+    def test_button_cycles_lift_levels(self, mobile_page):
+        """⇕ 按钮按 0 → 60 → 120 → 180 → 0 循环。
+
+        当前值不是挡位之一时（这里默认 80），要落在「最近的更高挡」上，
+        而不是先跳回 0 再重来。
+        """
+        mobile_page.click("#btn-plus")  # 切换条随面板展开才可见
+        btn = mobile_page.locator("#btn-dock-lift")
+        assert btn.is_visible()
+        assert btn.get_attribute("aria-label") == MOBILE_I18N["panel_tab_lift"] + " 80px"
+
+        btn.click()  # 80 → 120
+        assert dock_gap(mobile_page) == 120
+
+        for expected in (180, 0, 60, 120):
+            btn.click()
+            assert dock_gap(mobile_page) == expected
+
+    def test_button_is_not_counted_as_a_panel_tab(self, mobile_page):
+        """⇕ 不是第 5 个面板：不带 .tab 类，点了也不切换当前子面板。
+
+        带 .tab 会连带污染「传输中禁用」的那批断言（恰好 4 个 tab 被 disable）。
+        """
+        mobile_page.click("#btn-plus")
+        assert mobile_page.locator("#panel-tabs .tab").count() == 4
+        assert mobile_page.locator("#btn-dock-lift.tab").count() == 0
+
+        active = mobile_page.locator("#panel-tabs .tab.active")
+        before = active.get_attribute("data-panel")
+        mobile_page.locator("#btn-dock-lift").click()
+        assert active.count() == 1
+        assert active.get_attribute("data-panel") == before
 
 
 class TestManualMode:
