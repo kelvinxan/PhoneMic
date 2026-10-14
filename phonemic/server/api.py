@@ -58,9 +58,12 @@ class ConnectionManager:
         self.bridge = bridge
 
         # 配置热重载支持
+        logger.info("ConnectionManager: fetching SettingsManager")
         self.sm = SettingsManager.instance()
         self.max_records = self.sm.get("mobile_max_records", 10)
+        logger.info("ConnectionManager: binding setting-changed callback")
         self.sm.connect_changed("mobile_max_records", self._on_max_records_changed)
+        logger.info("ConnectionManager: ready")
 
     def _on_max_records_changed(self, new_value: int) -> None:
         self.max_records = new_value
@@ -170,14 +173,22 @@ def _get_transfer_queue() -> TransferQueue:
 def set_bridge(bridge: EventBridge) -> None:
     """设置进程通信队列（需在启动服务前调用）。"""
     global _manager
+    logger.info("set_bridge: creating ConnectionManager")
     _manager = ConnectionManager(bridge)
-    _file_receiver.on_done = lambda path, name, size: _manager.bridge.emit(
+    logger.info("set_bridge: ConnectionManager created")
+    file_cb = lambda path, name, size: _manager.bridge.emit(
         "file_saved", {"path": path, "name": name, "size": size}
     )
+    logger.info("set_bridge: file callback built")
+    _file_receiver.on_done = file_cb
+    logger.info("set_bridge: file receiver callback bound")
     # photo end 回调：把重组好的图片字节交给主进程（Qt 剪贴板写入必须在 GUI 线程）
-    _photo_receiver.on_done = lambda data, name, size: _manager.bridge.emit(
+    photo_cb = lambda data, name, size: _manager.bridge.emit(
         "photo_received", {"data": data, "name": name, "size": size}
     )
+    logger.info("set_bridge: photo callback built")
+    _photo_receiver.on_done = photo_cb
+    logger.info("set_bridge: photo receiver callback bound")
     logger.info("Message bridge set for backend service")
 
 

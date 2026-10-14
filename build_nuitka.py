@@ -29,6 +29,14 @@ BUILD_DIR = PROJECT_ROOT / "build" / "phonemic_nuitka"
 ICON_PATH = PROJECT_ROOT / "phonemic" / "resources" / "favicon.ico"
 MAIN_SCRIPT = PROJECT_ROOT / "phonemic" / "PhoneMic.py"
 
+# LTO（链接期优化）开关，默认开启。Windows 上出现段错误时可 --lto no 排查
+# （某些 MSVC 工具集的 LTO 会生成错误的机器码，表现为启动后随机崩溃）。
+LTO_MODE = "yes"
+
+# 调试构建开关（--debug）：关闭 C 优化、保留调试信息，用于定位打包版崩溃。
+# 官方建议段错误排查先试它；代价是体积更大、运行更慢，不适合发布。
+DEBUG_MODE = False
+
 # NSIS 配置
 NSIS_SCRIPT = PROJECT_ROOT / "makesetup.nsi"
 
@@ -142,7 +150,7 @@ def run_nuitka(onefile: bool, version: str, commit: str):
         "--windows-console-mode=disable",
         f"--windows-icon-from-ico={ICON_PATH}",
         f"--output-dir={BUILD_DIR}",
-        "--lto=yes",
+        f"--lto={LTO_MODE}",
         "--enable-plugin=pyside6",
         "--include-data-dir=./phonemic/resources=phonemic/resources",
         "--noinclude-data-files=*/test.html",
@@ -174,6 +182,9 @@ def run_nuitka(onefile: bool, version: str, commit: str):
         "--nofollow-import-to=PySide6.QtQuick",
         "--nofollow-import-to=PySide6.QtTest",
         "--nofollow-import-to=PySide6.QtXml",
+        # 非交互构建（CI / 重定向输出的终端）：Nuitka 默认会询问是否下载
+        # Dependency Walker，无 stdin 时按默认值 "No" 退出、编译直接失败。
+        "--assume-yes-for-downloads",
         "--jobs=4",
         "--experimental=debug-report-traceback",
         "--product-name=PhoneMic",
@@ -182,6 +193,9 @@ def run_nuitka(onefile: bool, version: str, commit: str):
         f"--product-version={version}",
         '--file-description="PhoneMic - 手机语音输入电脑端"',
         '--copyright="Copyright (c) 2026 PhoneMic Team. Licensed under Apache 2.0."',
+        # --debug 必须放在主脚本之前，否则会被当成脚本参数传给程序本身
+        # PySide6 会改写对象的 immortal 引用计数，故 --debug 下必须关掉该项检查
+        *(["--debug", "--no-debug-immortal-assumptions"] if DEBUG_MODE else []),
         str(MAIN_SCRIPT)
     ]
     print("Running Nuitka command:")
@@ -285,7 +299,21 @@ def main():
         "--vendor", action="store_true",
         help="编译后将第三方二进制（如 cloudflared）拷贝到 standalone dist 的 bin/ 目录"
     )
+    parser.add_argument(
+        "--lto", choices=["yes", "no"], default="yes",
+        help="是否启用 Nuitka 的链接期优化（默认 yes；排查运行时段错误时可设为 no）"
+    )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="调试构建（关闭 C 优化、保留调试信息），用于定位打包版崩溃；与 --lto yes 互斥"
+    )
     args = parser.parse_args()
+
+    global LTO_MODE, DEBUG_MODE
+    LTO_MODE = args.lto
+    DEBUG_MODE = args.debug
+    if DEBUG_MODE:
+        LTO_MODE = "no"
 
     # 前置检查
     if not ICON_PATH.exists():
